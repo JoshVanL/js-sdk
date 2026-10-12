@@ -23,10 +23,11 @@ describe("TaskHubWorker", () => {
   it("runs workflow work items while every activity slot is busy", async () => {
     // Ten activities that start a child workflow and wait for it, as an
     // activity calling scheduleNewWorkflow does: the sidecar only answers
-    // once the child's first workflow work item has run on this worker.
+    // once the child's first workflow work item has run on this worker. An
+    // eleventh activity must wait for a slot.
     const activity = { request: { case: "activityRequest", value: { name: "a" } }, completionToken: "a" };
     const child = { request: { case: "workflowRequest", value: { instanceId: "child" } }, completionToken: "w" };
-    const items = [...Array(10).fill(activity), child];
+    const items = [...Array(11).fill(activity), child];
 
     const getWorkItems = jest.fn((_req: unknown, opts: { signal: AbortSignal }) => ({
       [Symbol.asyncIterator]: () => ({
@@ -54,6 +55,11 @@ describe("TaskHubWorker", () => {
     expect(executeOrchestrator).toHaveBeenCalledTimes(1);
 
     releaseActivities();
+    const drainDeadline = Date.now() + 2000;
+    while (executeActivity.mock.calls.length < 11 && Date.now() < drainDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(executeActivity).toHaveBeenCalledTimes(11);
     await worker.stop();
   }, 10000);
 });
