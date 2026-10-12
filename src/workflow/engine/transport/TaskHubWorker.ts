@@ -43,7 +43,12 @@ export class TaskHubWorker {
   private _isRunning = false;
   private _stopWorker = false;
   private _activeWorkItems = 0;
-  private readonly _maxConcurrentWorkItems = 10;
+  private _activeActivities = 0;
+  // Bounds activities only. Workflow work items are always dispatched: an
+  // activity may wait on another workflow's progress (scheduleNewWorkflow
+  // returns once the new workflow has started), which needs a workflow work
+  // item to run on this worker.
+  private readonly _maxConcurrentActivities = 10;
   private readonly _workItemQueue: WorkItem[] = [];
   private _workItemStreamController?: AbortController;
 
@@ -119,7 +124,10 @@ export class TaskHubWorker {
           for await (const workItem of stream) {
             if (this._stopWorker) break;
 
-            if (this._activeWorkItems >= this._maxConcurrentWorkItems) {
+            if (
+              workItem.request.case === "activityRequest" &&
+              this._activeActivities >= this._maxConcurrentActivities
+            ) {
               if (this._workItemQueue.length < 100) {
                 this._workItemQueue.push(workItem);
                 this.logger.debug(`Queued work item (${this._workItemQueue.length} queued)`);
@@ -174,29 +182,35 @@ export class TaskHubWorker {
     if (requestType.case === "workflowRequest") {
       const req = requestType.value;
       this.logger.info(`Received "Orchestrator Request" work item with instance id '${req.instanceId}'`);
-      this.trackWorkItem(this.executeOrchestrator(req, workItem.completionToken));
+      this.trackWorkItem(this.executeOrchestrator(req, workItem.completionToken), false);
     } else if (requestType.case === "activityRequest") {
       this.logger.info(`Received "Activity Request" work item`);
-      this.trackWorkItem(this.executeActivity(requestType.value, workItem.completionToken));
+      this.trackWorkItem(this.executeActivity(requestType.value, workItem.completionToken), true);
     } else {
       this.logger.warn(`Received unknown work item type`);
     }
   }
 
-  private trackWorkItem(workPromise: Promise<void>): void {
+  private trackWorkItem(workPromise: Promise<void>, activity: boolean): void {
     this._activeWorkItems++;
+    if (activity) {
+      this._activeActivities++;
+    }
     workPromise
       .catch((err) => {
         this.logger.error("Unhandled error in work item execution:", err);
       })
       .finally(() => {
         this._activeWorkItems--;
+        if (activity) {
+          this._activeActivities--;
+        }
         this.drainQueue();
       });
   }
 
   private drainQueue(): void {
-    while (this._workItemQueue.length > 0 && this._activeWorkItems < this._maxConcurrentWorkItems) {
+    while (this._workItemQueue.length > 0 && this._activeActivities < this._maxConcurrentActivities) {
       const queued = this._workItemQueue.shift();
       if (queued) {
         this.dispatchWorkItem(queued);
